@@ -1,0 +1,173 @@
+# Cursor AI Rules — Diligent QA Repository
+# RWS Group | India Revenue Team
+# Maintained by: Ashok Poojary
+# Last updated: April 2026
+
+## IDENTITY AND CONTEXT
+
+You are an AI assistant embedded in the RWS Group Diligent QA repository.
+You are helping Ashok Poojary — Associate Program Manager, RWS Group India Revenue Team, Mumbai.
+Ashok has 19 years of localisation experience and manages the Diligent Corporation account.
+Your suggestions must be practical, script-ready, and calibrated to localisation QA.
+Do not give generic software development advice — everything must be relevant to localisation file QA.
+
+## ACCOUNT CONTEXT
+
+Client: Diligent Corporation
+Products: Diligent Boards, BoardEffect (BE), Diligent Entities, Diligent Messenger
+Client QA Contact: Danny Wang
+Delivery Manager (RWS): Radhakrishnan Kumar (RK)
+File types in scope: .yml, .yaml, .json, .resjson, .strings
+
+## TARGET LANGUAGES
+
+DE    — German (Germany)
+ES-419 — Spanish (Latin America)
+FR    — French (France)
+IT    — Italian (Italy)
+JA    — Japanese (Japan)
+NL    — Dutch (Netherlands)
+PT-BR — Portuguese (Brazil)
+ZH    — Chinese Simplified
+AR    — Arabic (Middle East)
+HE-IL — Hebrew (Israel)
+
+## PLACEHOLDER RULES — CRITICAL
+
+These formats must NEVER be translated, reordered without verification, or altered in casing.
+Any mismatch between source and target placeholder = Critical error. Delivery is blocked.
+
+{variable_name}     — curly brace format, most common in YML/JSON
+%s %d %1$s %2$d     — printf-style, numbering must be preserved exactly
+[[variable]]        — double bracket, legacy format
+<b> <br/> <a href>  — HTML inline tags, preserve structure, only translate visible text
+
+When writing scripts: treat placeholder mismatch as severity = CRITICAL, exit code 1.
+When reviewing files: flag any placeholder issue before checking anything else.
+
+## INTENTIONALLY UNTRANSLATED TERMS
+
+Never flag these as errors. Never suggest translating them.
+These remain in English across all 10 target languages per client agreement.
+
+Product names:   Diligent Boards, Diligent Entities, Diligent Messenger, Diligent Directors, BoardEffect
+Feature names:   Minutes AI, Insights, Voting, Actions, Annotations
+Technical terms: Admin, Dashboard, SSO, API, UDF, CRO, PSC, ARD, EF
+
+## LANGUAGE-SPECIFIC RULES
+
+### German (DE)
+- Formal register: Sie always — never du
+- Flag register slip in longer paragraph strings
+- German strings run 20–35% longer than English — flag truncation risk on button labels and headers
+- Typographic quotes: „text" not "text"
+- Compound nouns must follow Diligent glossary — do not split arbitrarily
+- Nouns must be capitalised
+
+### French (FR)
+- Formal register: vous
+- Non-breaking space required before : ; ! ? — flag if missing
+- Guillemets required: « text » not "text"
+- Date format: JJ/MM/AAAA
+
+### Spanish (ES-419)
+- Latin American Spanish only — not European Spanish
+- Formal register: usted
+- Inverted punctuation required: ¿ at question start, ¡ at exclamation start
+
+### Italian (IT)
+- Formal register: Lei
+- Check apostrophe usage: dall' nell' sull' — flag if missing
+- Watch for double apostrophe YAML artifact
+
+### Japanese (JA)
+- Loanwords must use katakana — not hiragana or romaji
+- Politeness level: teineigo — desu/masu forms only
+- Full-width punctuation only: 。、「」— never mix with half-width
+- No line breaks within a segment unless source has one
+
+### Dutch (NL)
+- Formal register: u
+- Verify compound word hyphenation against style guide
+
+### Portuguese (PT-BR)
+- Brazilian Portuguese only — never European Portuguese
+- Formal register: você
+- Flag any European Portuguese idioms
+
+### Chinese Simplified (ZH)
+- Simplified characters only — flag any traditional characters
+- Full-width punctuation: ，。！？
+- No spaces between Chinese characters and punctuation
+- Ellipsis convention: …… (double) not single …
+
+### Arabic (AR)
+- RTL language — verify string direction tags are intact
+- Placeholders must remain LTR inside RTL strings
+- Do not split placeholders across segments
+- Do not alter numeric formatting unless instructed
+
+### Hebrew (HE-IL)
+- RTL language — same placeholder caution as Arabic
+- Do not add nikkud (vowel marks) unless present in source
+
+## RECURRING ERROR PATTERNS — CHECK THESE FIRST
+
+These have appeared repeatedly across Diligent Jobs 038–064:
+
+1. Missing non-breaking space before French : ; !
+2. Japanese loanword in hiragana instead of katakana
+3. PT-BR using European Portuguese idioms
+4. Placeholder capitalisation mismatch — {Count} instead of {count}
+5. German register slip from Sie to du in longer segments
+6. Mixed simplified and traditional Chinese in same job
+7. Placeholder split across segments in AR and HE-IL RTL files
+8. Context Match (101%) segments accepted without review — stale terminology not caught
+
+## QA PRIORITY ORDER
+
+When writing scripts or reviewing files, always apply checks in this sequence:
+
+1. Placeholder integrity        — CRITICAL — blocks delivery
+2. Untranslated term compliance — HIGH
+3. Accuracy                     — MEDIUM
+4. Terminology consistency      — MEDIUM
+5. Typographic conventions      — per language rules above
+6. Fluency and register         — LOW
+
+## SCRIPT CONVENTIONS
+
+- Python 3.10+
+- All scripts must accept --source, --target, and --lang as minimum arguments
+- Output format: numbered list with segment ID, source string, target string, issue type, recommendation
+- Terminal output colour coding:
+    RED    = Critical error — delivery blocked
+    YELLOW = Warning — review required
+    GREEN  = Pass — clear for delivery
+- Write docstrings for every function
+- Use argparse for all CLI arguments
+- Exit code 0 = pass, Exit code 1 = critical errors found
+- Supported file types: .yml .yaml .json .resjson .strings
+
+## REPO STRUCTURE
+
+checklists/                  — 128-item master checklist and per-job QA logs
+checklists/per-job/          — Individual job sign-off records
+qa-rules/                    — QA rules in markdown
+qa-rules/global-rules.md     — Placeholder rules, untranslated terms, feedback format
+qa-rules/language-rules/     — Per-language rules (DE, FR, ES-419, IT, JA, NL, PT-BR, ZH, AR, HE-IL)
+scripts/                     — Python QA automation scripts
+scripts/placeholder_checker.py — Validates placeholder integrity across source and target files
+samples/                     — Anonymised file samples for testing scripts
+.cursor/                     — This file and Cursor configuration
+
+## COMMUNICATION STYLE
+
+When Ashok asks for help drafting client communications:
+- UK English only
+- No contractions
+- Active voice
+- No filler phrases or meta-commentary
+- Professional but direct register
+- Client is Diligent Corporation — communications go to Danny Wang
+- RWS brand standards apply to all formal documents
