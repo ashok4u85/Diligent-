@@ -1,366 +1,295 @@
 """
-Diligent / DTX String Diff Extractor
--------------------------------------
-Compares two folder trees (Previous version vs Latest version) and extracts
-new, changed, and removed strings across YML, JSON, resjson, and .strings files.
-Outputs an RWS-branded Excel with one sheet per subfolder + a summary sheet.
+diligent_string_diff.py
+=======================
+Diligent Account — RWS Group India Revenue Team
+Maintained by: Ashok Poojary
+
+Description:
+    Three-way string diff tool. Compares:
+    - Source (EN) — new version from client
+    - Old target  — previous delivery
+    - New target  — current delivery from linguist
+
+    Identifies exactly what the linguist changed between
+    deliveries and flags each change for linguistic review.
+    Replaces manual Beyond Compare process.
 
 Usage:
-    python diligent_string_diff.py <previous_folder> <latest_folder> [output.xlsx]
+    python diligent_string_diff.py --source en_new.json --old de_old.json --new de_new.json --lang DE
+    python diligent_string_diff.py --source en_new.yml  --old zh_old.yml  --new zh_new.yml  --lang ZH
 
-Example:
-    python diligent_string_diff.py "C:/DTX/064_BE/Previous/To Translate" \
-                                   "C:/DTX/064_BE/Latest/To Translate" \
-                                   064_BE_StringDiff.xlsx
+Supported formats:
+    .yml / .yaml / .json / .resjson / .strings
+
+Output:
+    RED    = Source changed AND target changed — high risk
+    YELLOW = Target changed only — linguist update — review required
+    GREEN  = No changes detected
 """
 
-import sys
-import os
-import json
 import re
+import sys
+import json
+import argparse
 from pathlib import Path
-from collections import defaultdict
 
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
-# ── RWS brand colours ────────────────────────────────────────────────────────
-RWS_PURPLE = "3E016F"
-RWS_PINK   = "E60054"
-RWS_TEAL   = "00A89F"
-RWS_AMBER  = "FFC700"
-WHITE      = "FFFFFF"
-LIGHT_GREY = "F5F5F5"
-MID_GREY   = "E0E0E0"
-DARK_TEXT  = "1A1A2E"
-GREEN_OK   = "16A34A"
-AMBER_WARN = "D97706"
-RED_ALERT  = "DC2626"
-NOTE_BG    = "F9F4FF"
+# ─────────────────────────────────────────
+# ANSI colour codes
+# ─────────────────────────────────────────
+RED    = "\033[91m"
+YELLOW = "\033[93m"
+GREEN  = "\033[92m"
+BLUE   = "\033[94m"
+CYAN   = "\033[96m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
 
-STATUS_COLOURS = {
-    "NEW":     ("E8F5E9", "16A34A"),   # light green fill / green text
-    "CHANGED": ("FFF8E1", "D97706"),   # light amber fill / amber text
-    "REMOVED": ("FFEBEE", "DC2626"),   # light red fill / red text
-}
 
-thin  = Side(style="thin",   color="D0D0D0")
-thick = Side(style="medium", color="D0D0D0")
-thin_b = Border(left=thin, right=thin, top=thin, bottom=thin)
+# ─────────────────────────────────────────
+# File parsers
+# ─────────────────────────────────────────
 
-def _fill(hex_): return PatternFill("solid", fgColor=hex_)
-def _font(bold=False, size=10, color=DARK_TEXT, name="Calibri"):
-    return Font(name=name, bold=bold, size=size, color=color)
-def _align(h="left", v="center", wrap=False):
-    return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
-
-# ── File parsers ──────────────────────────────────────────────────────────────
-
-def parse_json(path: Path) -> dict:
-    """Parse flat or nested JSON/resjson into key→value dict."""
-    try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
-        data = json.loads(text)
-    except Exception:
-        return {}
-    return _flatten(data)
-
-def _flatten(obj, prefix=""):
-    items = {}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, (dict, list)):
-                items.update(_flatten(v, full_key))
-            else:
-                items[full_key] = str(v) if v is not None else ""
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            items.update(_flatten(v, f"{prefix}[{i}]"))
-    return items
-
-def parse_yaml(path: Path) -> dict:
-    """Parse YAML using PyYAML if available, else basic key: value."""
+def parse_yml(filepath: str) -> dict:
+    """Parse a YAML file into a flat key-value dict."""
     try:
         import yaml
-        with path.open(encoding="utf-8-sig", errors="replace") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return _flatten(data) if isinstance(data, (dict, list)) else {}
+        return flatten_dict(data)
     except ImportError:
-        pass
-    # Fallback: simple key: "value" regex
-    result = {}
-    pattern = re.compile(r'^(\s*)([^#\s][^:]*?):\s*["\']?(.*?)["\']?\s*$')
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        m = pattern.match(line)
-        if m:
-            key = m.group(2).strip()
-            val = m.group(3).strip().strip('"\'')
-            if key and val:
-                result[key] = val
+        print(f"{RED}ERROR: PyYAML not installed. Run: pip install pyyaml{RESET}")
+        sys.exit(1)
+
+
+def parse_json(filepath: str) -> dict:
+    """Parse a JSON or RESJSON file into a flat key-value dict."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return flatten_dict(data)
+
+
+def parse_strings(filepath: str) -> dict:
+    """Parse an iOS .strings file. Format: key = value;"""
+    result  = {}
+    pattern = re.compile(r'^"(.+?)"\s*=\s*"(.+?)"\s*;', re.MULTILINE)
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    for match in pattern.finditer(content):
+        result[match.group(1)] = match.group(2)
     return result
 
-def parse_strings(path: Path) -> dict:
-    """Parse Apple .strings format: "key" = "value";"""
-    result = {}
-    pattern = re.compile(r'^"(.+?)"\s*=\s*"(.*?)"\s*;')
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        m = pattern.match(line.strip())
-        if m:
-            result[m.group(1)] = m.group(2)
-    return result
 
-PARSERS = {
-    ".json":    parse_json,
-    ".resjson": parse_json,
-    ".yml":     parse_yaml,
-    ".yaml":    parse_yaml,
-    ".strings": parse_strings,
-}
+def flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
+    """Flatten a nested dict into dot-notation keys."""
+    items = {}
+    if not isinstance(d, dict):
+        return items
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else str(k)
+        if isinstance(v, dict):
+            items.update(flatten_dict(v, new_key, sep=sep))
+        elif isinstance(v, str):
+            items[new_key] = v
+    return items
 
-def parse_file(path: Path) -> dict:
-    parser = PARSERS.get(path.suffix.lower())
-    return parser(path) if parser else {}
 
-# ── Folder walker ─────────────────────────────────────────────────────────────
+def load_file(filepath: str) -> dict:
+    """Load a file based on its extension."""
+    path = Path(filepath)
+    ext  = path.suffix.lower()
+    if ext in [".yml", ".yaml"]:
+        return parse_yml(filepath)
+    elif ext in [".json", ".resjson"]:
+        return parse_json(filepath)
+    elif ext == ".strings":
+        return parse_strings(filepath)
+    else:
+        print(f"{RED}ERROR: Unsupported file type: {ext}{RESET}")
+        sys.exit(1)
 
-def collect_files(root: Path) -> dict[str, Path]:
-    """Return {relative_posix_path: absolute_path} for all supported files."""
-    files = {}
-    for p in root.rglob("*"):
-        if p.suffix.lower() in PARSERS and p.is_file():
-            files[p.relative_to(root).as_posix()] = p
-    return files
 
-# ── Diff engine ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# Diff logic
+# ─────────────────────────────────────────
 
-def diff_folders(prev_root: Path, new_root: Path):
+def classify_change(src_old, src_new, tgt_old, tgt_new) -> str:
     """
-    Returns list of dicts:
-    {subfolder, file, key, status, old_value, new_value}
+    Classify the type of change across source and target.
+
+    Returns:
+        'no_change'         — nothing changed
+        'source_only'       — source changed, target unchanged (stale TM risk)
+        'target_only'       — target changed, source unchanged (linguist update)
+        'both_changed'      — both source and target changed (high risk)
+        'new_key'           — key did not exist in previous version
     """
-    prev_files = collect_files(prev_root)
-    new_files  = collect_files(new_root)
+    src_changed = src_old != src_new if src_old else True
+    tgt_changed = tgt_old != tgt_new if tgt_old else True
 
-    all_rel = sorted(set(prev_files) | set(new_files))
-    rows = []
+    if tgt_old is None:
+        return "new_key"
+    if not src_changed and not tgt_changed:
+        return "no_change"
+    if src_changed and not tgt_changed:
+        return "source_only"
+    if not src_changed and tgt_changed:
+        return "target_only"
+    if src_changed and tgt_changed:
+        return "both_changed"
+    return "no_change"
 
-    for rel in all_rel:
-        prev_kv = parse_file(prev_files[rel]) if rel in prev_files else {}
-        new_kv  = parse_file(new_files[rel])  if rel in new_files  else {}
 
-        all_keys = sorted(set(prev_kv) | set(new_kv))
-        for key in all_keys:
-            old_val = prev_kv.get(key)
-            new_val = new_kv.get(key)
+# ─────────────────────────────────────────
+# Main diff runner
+# ─────────────────────────────────────────
 
-            if old_val is None and new_val is not None:
-                status = "NEW"
-            elif old_val is not None and new_val is None:
-                status = "REMOVED"
-            elif old_val != new_val:
-                status = "CHANGED"
-            else:
-                continue  # identical — skip
+def run_diff(source_file: str, old_file: str, new_file: str, lang: str) -> list:
+    """
+    Run three-way diff and return list of changed items.
+    Also prints results to terminal.
+    """
+    print(f"\n{BOLD}{BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"{BOLD}  Diligent QA — String Diff Tool v2{RESET}")
+    print(f"{BOLD}  RWS Group | India Revenue Team{RESET}")
+    print(f"{BOLD}{BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}\n")
+    print(f"  Source (new) : {source_file}")
+    print(f"  Target (old) : {old_file}")
+    print(f"  Target (new) : {new_file}")
+    print(f"  Language     : {lang}\n")
 
-            parts = rel.split("/")
-            subfolder = parts[0] if len(parts) > 1 else "(root)"
-            rows.append({
-                "subfolder": subfolder,
-                "file":      rel,
-                "key":       key,
-                "status":    status,
-                "old_value": old_val or "",
-                "new_value": new_val or "",
-            })
+    source_strings = load_file(source_file)
+    old_strings    = load_file(old_file)
+    new_strings    = load_file(new_file)
 
-    return rows
+    print(f"  Source keys  : {len(source_strings)}")
+    print(f"  Old TGT keys : {len(old_strings)}")
+    print(f"  New TGT keys : {len(new_strings)}\n")
 
-# ── Excel builder ─────────────────────────────────────────────────────────────
+    results = {
+        "both_changed":  [],
+        "target_only":   [],
+        "source_only":   [],
+        "new_key":       [],
+    }
 
-HEADERS = ["#", "File", "String Key", "Status", "Previous Value", "New / Current Value"]
-COL_WIDTHS = [5, 40, 40, 12, 50, 50]
+    for key in source_strings:
+        src_new = source_strings.get(key)
+        tgt_old = old_strings.get(key)
+        tgt_new = new_strings.get(key)
 
-def write_title(ws, row, text, n_cols):
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=n_cols)
-    c = ws.cell(row=row, column=1, value=text)
-    c.font      = _font(bold=True, size=13, color=WHITE)
-    c.fill      = _fill(RWS_PURPLE)
-    c.alignment = _align("left")
-    ws.row_dimensions[row].height = 26
+        if tgt_new is None:
+            continue
 
-def write_note(ws, row, text, n_cols):
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=n_cols)
-    c = ws.cell(row=row, column=1, value=text)
-    c.font      = _font(size=9, color="666666")
-    c.fill      = _fill(NOTE_BG)
-    c.alignment = _align("left", wrap=True)
-    ws.row_dimensions[row].height = 32
+        # For source_old we use src_new as proxy if not available
+        src_old = src_new
+        classification = classify_change(src_old, src_new, tgt_old, tgt_new)
 
-def write_headers(ws, row, labels):
-    for i, h in enumerate(labels, 1):
-        c = ws.cell(row=row, column=i, value=h)
-        c.font      = _font(bold=True, size=10, color=WHITE)
-        c.fill      = _fill(RWS_PURPLE)
-        c.alignment = _align("center", wrap=True)
-        c.border    = thin_b
-    ws.row_dimensions[row].height = 34
+        if classification == "no_change":
+            continue
 
-def write_data_row(ws, row, values, status, alt):
-    fill_hex, text_hex = STATUS_COLOURS.get(status, (WHITE, DARK_TEXT))
-    row_fill = fill_hex if status in STATUS_COLOURS else (LIGHT_GREY if alt else WHITE)
+        item = {
+            "key":     key,
+            "source":  src_new,
+            "old_tgt": tgt_old or "— not in previous file —",
+            "new_tgt": tgt_new,
+            "type":    classification,
+            "lang":    lang,
+        }
+        if classification in results:
+            results[classification].append(item)
 
-    for i, val in enumerate(values, 1):
-        c = ws.cell(row=row, column=i, value=val)
-        c.font      = _font(size=10, color=text_hex if i == 4 else DARK_TEXT,
-                            bold=(i == 4))
-        c.fill      = _fill(row_fill)
-        c.alignment = _align("left", wrap=True)
-        c.border    = thin_b
-    ws.row_dimensions[row].height = 30
+    # ─────────────────────────────────────────
+    # Print results
+    # ─────────────────────────────────────────
 
-def write_sheet(ws, title, note, rows_data, prev_label, new_label):
-    n = len(HEADERS)
-    write_title(ws, 1, title, n)
-    write_note(ws, 2, note, n)
-    ws.row_dimensions[3].height = 8   # spacer
-    write_headers(ws, 4, HEADERS)
-    ws.freeze_panes = "A5"
+    all_changes = (
+        results["both_changed"] +
+        results["target_only"] +
+        results["source_only"] +
+        results["new_key"]
+    )
 
-    for i, r in enumerate(rows_data):
-        excel_row = 5 + i
-        values = [
-            i + 1,
-            r["file"],
-            r["key"],
-            r["status"],
-            r["old_value"],
-            r["new_value"],
-        ]
-        write_data_row(ws, excel_row, values, r["status"], alt=(i % 2 == 1))
+    if not all_changes:
+        print(f"{GREEN}  ✅  PASS — No string changes detected.{RESET}\n")
+        return []
 
-    # Column widths
-    for col_i, w in enumerate(COL_WIDTHS, 1):
-        ws.column_dimensions[get_column_letter(col_i)].width = w
+    # Both changed — highest risk
+    if results["both_changed"]:
+        print(f"{RED}{BOLD}  ⚠  SOURCE + TARGET CHANGED — HIGH RISK ({len(results['both_changed'])} strings){RESET}\n")
+        for i, item in enumerate(results["both_changed"], 1):
+            print(f"{RED}  [{i:03d}] BOTH CHANGED{RESET}")
+            print(f"        Key     : {item['key']}")
+            print(f"        Source  : {item['source']}")
+            print(f"        Old TGT : {item['old_tgt']}")
+            print(f"        New TGT : {item['new_tgt']}")
+            print(f"        Action  : {RED}Submit for linguistic review{RESET}\n")
 
-    # Tab colour
-    ws.sheet_properties.tabColor = RWS_TEAL
+    # Target only changed — linguist update
+    if results["target_only"]:
+        print(f"{YELLOW}{BOLD}  ℹ  TARGET CHANGED BY LINGUIST ({len(results['target_only'])} strings){RESET}\n")
+        for i, item in enumerate(results["target_only"], 1):
+            print(f"{YELLOW}  [{i:03d}] LINGUIST UPDATE{RESET}")
+            print(f"        Key     : {item['key']}")
+            print(f"        Source  : {item['source']}")
+            print(f"        Old TGT : {item['old_tgt']}")
+            print(f"        New TGT : {item['new_tgt']}")
+            print(f"        Action  : {YELLOW}Review — accept / revert / escalate{RESET}\n")
 
-def write_summary_sheet(ws, all_rows, prev_label, new_label):
-    by_sub = defaultdict(lambda: defaultdict(int))
-    for r in all_rows:
-        by_sub[r["subfolder"]][r["status"]] += 1
+    # Source only changed — stale TM risk
+    if results["source_only"]:
+        print(f"{CYAN}{BOLD}  ℹ  SOURCE CHANGED, TARGET UNCHANGED — STALE TM RISK ({len(results['source_only'])} strings){RESET}\n")
+        for i, item in enumerate(results["source_only"], 1):
+            print(f"{CYAN}  [{i:03d}] STALE TM RISK{RESET}")
+            print(f"        Key     : {item['key']}")
+            print(f"        Source  : {item['source']}")
+            print(f"        Old TGT : {item['old_tgt']}")
+            print(f"        New TGT : {item['new_tgt']}")
+            print(f"        Action  : {CYAN}Verify translation still matches updated source{RESET}\n")
 
-    n = 6
-    write_title(ws, 1, "String Diff Summary", n)
-    write_note(ws, 2,
-               f"Comparing: {prev_label}  →  {new_label}  |  "
-               f"Total changes: {len(all_rows)}", n)
-    ws.row_dimensions[3].height = 8
+    # New keys
+    if results["new_key"]:
+        print(f"{BLUE}{BOLD}  ℹ  NEW KEYS — NOT IN PREVIOUS DELIVERY ({len(results['new_key'])} strings){RESET}\n")
+        for i, item in enumerate(results["new_key"], 1):
+            print(f"{BLUE}  [{i:03d}] NEW KEY{RESET}")
+            print(f"        Key     : {item['key']}")
+            print(f"        Source  : {item['source']}")
+            print(f"        New TGT : {item['new_tgt']}\n")
 
-    hdrs = ["Subfolder", "NEW Strings", "CHANGED Strings", "REMOVED Strings", "Total Changes"]
-    write_headers(ws, 4, hdrs)
-    ws.freeze_panes = "A5"
+    # Summary
+    print(f"{BOLD}{BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"{BOLD}  SUMMARY — {lang}{RESET}")
+    print(f"  Both source + target changed : {RED}{len(results['both_changed'])}{RESET}")
+    print(f"  Linguist updates (TGT only)  : {YELLOW}{len(results['target_only'])}{RESET}")
+    print(f"  Stale TM risk (SRC only)     : {CYAN}{len(results['source_only'])}{RESET}")
+    print(f"  New keys                     : {BLUE}{len(results['new_key'])}{RESET}")
+    print(f"  Total flagged                : {BOLD}{len(all_changes)}{RESET}")
+    print(f"{BOLD}{BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}\n")
 
-    col_widths_s = [30, 18, 20, 20, 16]
-    for col_i, w in enumerate(col_widths_s, 1):
-        ws.column_dimensions[get_column_letter(col_i)].width = w
+    return all_changes
 
-    total_new = total_chg = total_rem = 0
-    for i, (sub, counts) in enumerate(sorted(by_sub.items())):
-        row = 5 + i
-        new_ = counts.get("NEW", 0)
-        chg_ = counts.get("CHANGED", 0)
-        rem_ = counts.get("REMOVED", 0)
-        tot_ = new_ + chg_ + rem_
-        total_new += new_; total_chg += chg_; total_rem += rem_
-        alt = (i % 2 == 1)
-        vals = [sub, new_, chg_, rem_, tot_]
-        for ci, v in enumerate(vals, 1):
-            c = ws.cell(row=row, column=ci, value=v)
-            c.font      = _font(size=10)
-            c.fill      = _fill(LIGHT_GREY if alt else WHITE)
-            c.alignment = _align("left" if ci == 1 else "center")
-            c.border    = thin_b
 
-    # Grand total
-    gt_row = 5 + len(by_sub)
-    gt_vals = ["TOTAL", total_new, total_chg, total_rem, total_new + total_chg + total_rem]
-    pink_s  = Side(style="medium", color=RWS_PINK)
-    gt_border = Border(left=thin, right=thin, top=pink_s, bottom=pink_s)
-    for ci, v in enumerate(gt_vals, 1):
-        c = ws.cell(row=gt_row, column=ci, value=v)
-        c.font      = _font(bold=True, size=10, color=RWS_PINK)
-        c.fill      = _fill(MID_GREY)
-        c.border    = gt_border
-        c.alignment = _align("left" if ci == 1 else "center")
-
-    ws.sheet_properties.tabColor = RWS_PURPLE
-
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Diligent QA — Three-Way String Diff | RWS Group"
+    )
+    parser.add_argument("--source", required=True, help="New source file (e.g. en_new.json)")
+    parser.add_argument("--old",    required=True, help="Previous target file (e.g. de_old.json)")
+    parser.add_argument("--new",    required=True, help="New target file (e.g. de_new.json)")
+    parser.add_argument("--lang",   required=True, help="Target language code (e.g. DE, ZH, FR)")
+    args = parser.parse_args()
 
-    prev_root = Path(sys.argv[1])
-    new_root  = Path(sys.argv[2])
-    output    = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("StringDiff_Output.xlsx")
+    run_diff(
+        source_file=args.source,
+        old_file=args.old,
+        new_file=args.new,
+        lang=args.lang.upper(),
+    )
 
-    if not prev_root.exists():
-        print(f"ERROR: Previous folder not found: {prev_root}")
-        sys.exit(1)
-    if not new_root.exists():
-        print(f"ERROR: Latest folder not found: {new_root}")
-        sys.exit(1)
-
-    print(f"Scanning previous: {prev_root}")
-    print(f"Scanning latest:   {new_root}")
-
-    all_rows = diff_folders(prev_root, new_root)
-
-    if not all_rows:
-        print("No differences found between the two folders.")
-        sys.exit(0)
-
-    print(f"Found {len(all_rows)} differences. Building Excel…")
-
-    by_sub = defaultdict(list)
-    for r in all_rows:
-        by_sub[r["subfolder"]].append(r)
-
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)   # remove default sheet
-
-    prev_label = prev_root.name
-    new_label  = new_root.name
-
-    # Summary sheet first
-    ws_sum = wb.create_sheet("Summary")
-    write_summary_sheet(ws_sum, all_rows, prev_label, new_label)
-
-    # One sheet per subfolder
-    for sub in sorted(by_sub):
-        safe_name = sub[:31].replace("/", "_").replace("\\", "_")
-        ws = wb.create_sheet(safe_name)
-        title = f"String Changes — {sub}"
-        note  = (f"Previous: {prev_label}   |   Latest: {new_label}   |   "
-                 f"{len(by_sub[sub])} change(s)")
-        write_sheet(ws, title, note, by_sub[sub], prev_label, new_label)
-
-    # All-changes sheet
-    ws_all = wb.create_sheet("All Changes")
-    write_sheet(ws_all, "All String Changes",
-                f"Previous: {prev_label}   |   Latest: {new_label}   |   "
-                f"{len(all_rows)} total change(s)",
-                all_rows, prev_label, new_label)
-    ws_all.sheet_properties.tabColor = RWS_PINK
-
-    wb.save(output)
-    print(f"Saved: {output}")
-    return str(output)
 
 if __name__ == "__main__":
     main()
